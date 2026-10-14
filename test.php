@@ -6,15 +6,26 @@ require __DIR__ . '/src/SzamlazzAgent.php';
 
 use KK\StripeSzamlazz\{Invoice, InvoiceItem, SzamlazzAgent};
 
+// Saját ellenőrzés az assert() helyett: az assert éles PHP-beállításnál
+// (zend.assertions = -1) kikapcsol, és akkor a teszt hibás számításnál is
+// „OK”-t írna. Ez a függvény minden beállítás mellett megállítja a futást.
+function check(bool $ok, string $mit): void
+{
+    if (!$ok) {
+        fwrite(STDERR, "HIBA: {$mit}\n");
+        exit(1);
+    }
+}
+
 $item = new InvoiceItem('Havidíjas karbantartás', 1, 'hó', 10000.0, '27');
-assert($item->netTotal() === 10000.0, 'nettó');
-assert($item->vatTotal() === 2700.0, 'áfa');
-assert($item->grossTotal() === 12700.0, 'bruttó');
+check($item->netTotal() === 10000.0, 'nettó');
+check($item->vatTotal() === 2700.0, 'áfa');
+check($item->grossTotal() === 12700.0, 'bruttó');
 echo "számítás OK: 10000 + 27% = {$item->grossTotal()}\n";
 
 $aam = new InvoiceItem('Alanyi mentes tétel', 2, 'db', 5000.0, 'AAM');
-assert($aam->vatTotal() === 0.0, 'AAM-nál nincs áfa');
-assert($aam->grossTotal() === 10000.0, 'AAM bruttó');
+check($aam->vatTotal() === 0.0, 'AAM-nál nincs áfa');
+check($aam->grossTotal() === 10000.0, 'AAM bruttó');
 echo "AAM OK: 2 × 5000 = {$aam->grossTotal()}, áfa {$aam->vatTotal()}\n";
 
 $invoice = new Invoice(
