@@ -5,43 +5,6 @@ declare(strict_types=1);
 namespace KK\StripeSzamlazz;
 
 /**
- * Egyetlen számlatétel.
- *
- * Az összegeket maga számolja ki. Az Agent ugyanis ellenőrzi, hogy
- * nettó egységár × mennyiség = nettó érték, és nettó + áfa = bruttó —
- * ha ezek egy fillérrel eltérnek, a kérés elszáll. Egy helyen kerekítünk.
- */
-final class InvoiceItem
-{
-    public function __construct(
-        public readonly string $name,
-        public readonly float $quantity,
-        public readonly string $unit,
-        public readonly float $netUnitPrice,
-        public readonly string $vatKey,   // pl. '27', 'AAM', 'TAM'
-    ) {
-    }
-
-    public function netTotal(): float
-    {
-        return round($this->quantity * $this->netUnitPrice, 2);
-    }
-
-    public function vatTotal(): float
-    {
-        if (!is_numeric($this->vatKey)) {
-            return 0.0;   // AAM, TAM és társai: nincs felszámított áfa
-        }
-        return round($this->netTotal() * ((float) $this->vatKey / 100), 2);
-    }
-
-    public function grossTotal(): float
-    {
-        return round($this->netTotal() + $this->vatTotal(), 2);
-    }
-}
-
-/**
  * Egy kiállítandó számla.
  *
  * A három dátum alapértelmezése a mai nap: kártyás fizetésnél a
@@ -74,6 +37,8 @@ final class Invoice
         ?string $issueDate = null,
         ?string $fulfilmentDate = null,
         ?string $dueDate = null,
+        // Helyesbítő számlánál az eredeti számla száma, amire hivatkozik.
+        public readonly ?string $correctsInvoiceNumber = null,
     ) {
         if ($items === []) {
             throw new \InvalidArgumentException('A számlán legalább egy tétel kell legyen.');

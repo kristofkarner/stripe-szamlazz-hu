@@ -5,22 +5,24 @@ declare(strict_types=1);
 namespace KK\StripeSzamlazz;
 
 /**
- * Számlázz.hu Számla Agent — számlakiállítás XML-kéréssel.
+ * Számlázz.hu Számla Agent — számla és sztornó XML-kéréssel.
  *
  * A kérés multipart/form-data POST a https://www.szamlazz.hu/szamla/
- * címre, ahol az XML tartalma az `action-xmlagentxmlfile` NEVŰ mezőben
- * megy. A mező neve dönti el, melyik műveletet hajtja végre az Agent —
- * nem az XML tartalma.
+ * címre. A mező NEVE dönti el, melyik műveletet hajtja végre az Agent,
+ * nem az XML tartalma: számlánál `action-xmlagentxmlfile`, sztornónál
+ * `action-szamla_agent_st`.
  *
- * A válasz a HTTP-fejlécekben érkezik: szlahu_error_code,
- * szlahu_error_message, szlahu_szamlaszam. A hibát tehát akkor is látni
- * kell, ha a HTTP-státusz 200.
+ * A válasz a HTTP-fejlécekben érkezik: szlahu_error_code, szlahu_error
+ * (URL-kódolva), szlahu_szamlaszam (URL-kódolva). A hibát tehát akkor is
+ * látni kell, ha a HTTP-státusz 200.
  */
 final class SzamlazzAgent
 {
     private const ENDPOINT = 'https://www.szamlazz.hu/szamla/';
     private const XMLNS = 'http://www.szamlazz.hu/xmlszamla';
     private const XSD = 'http://www.szamlazz.hu/szamla/docs/xsds/agent/xmlszamla.xsd';
+    private const XMLNS_STORNO = 'http://www.szamlazz.hu/xmlszamlast';
+    private const XSD_STORNO = 'https://www.szamlazz.hu/szamla/docs/xsds/agentst/xmlszamlast.xsd';
 
     public function __construct(
         private readonly string $agentKey,
@@ -30,27 +32,48 @@ final class SzamlazzAgent
     }
 
     /**
-     * @param Invoice $invoice a kiállítandó számla
+     * Számla vagy helyesbítő számla kiállítása.
+     *
      * @return string a kiállított számla sorszáma
      * @throws AgentException ha az Agent hibát jelez
      */
     public function issue(Invoice $invoice): string
     {
-        $xml = $this->buildXml($invoice);
-        [$status, $headers] = $this->post($xml);
+        [$status, $headers] = $this->post('action-xmlagentxmlfile', $this->buildXml($invoice));
+        return self::invoiceNumberFrom($status, $headers);
+    }
 
+    /**
+     * Egy kiállított számla sztornózása — teljes visszatérítésnél.
+     *
+     * @return string a sztornó számla sorszáma
+     * @throws AgentException ha az Agent hibát jelez
+     */
+    public function reverse(string $invoiceNumber, ?string $buyerEmail = null): string
+    {
+        [$status, $headers] = $this->post('action-szamla_agent_st', $this->buildReversalXml($invoiceNumber, $buyerEmail));
+        return self::invoiceNumberFrom($status, $headers);
+    }
+
+    /**
+     * A válaszfejlécekből a sorszám — vagy kivétel, ha hibát jeleznek.
+     *
+     * @param array<string,string> $headers kisbetűs fejlécnevekkel
+     */
+    public static function invoiceNumberFrom(int $status, array $headers): string
+    {
         // A hibakód a fejlécben jön, a HTTP-státusztól függetlenül.
         $errorCode = $headers['szlahu_error_code'] ?? null;
         if ($errorCode !== null && $errorCode !== '') {
-            $message = $headers['szlahu_error_message'] ?? 'ismeretlen hiba';
+            $message = urldecode($headers['szlahu_error'] ?? 'ismeretlen hiba');
             throw new AgentException(
-                sprintf('Számla Agent hiba (%s): %s', $errorCode, rawurldecode($message)),
+                sprintf('Számla Agent hiba (%s): %s', $errorCode, $message),
                 (int) $errorCode
             );
         }
 
-        $number = $headers['szlahu_szamlaszam'] ?? null;
-        if ($number === null || $number === '') {
+        $number = urldecode($headers['szlahu_szamlaszam'] ?? '');
+        if ($number === '') {
             throw new AgentException(
                 "A válasz nem tartalmaz számlaszámot (HTTP {$status}). "
                 . 'Ilyenkor NEM biztos, hogy a számla nem készült el — '
@@ -89,6 +112,7 @@ final class SzamlazzAgent
         // rendszerünkből — ez az, amivel utólag párosítani lehet.
         $add($settings, 'szamlaKulsoAzon', $invoice->externalId);
 
+        // Az Agent kötött sorrendet vár — az elemek nem cserélhetők fel.
         $header = $doc->createElement('fejlec');
         $root->appendChild($header);
         $add($header, 'keltDatum', $invoice->issueDate);
@@ -103,6 +127,10 @@ final class SzamlazzAgent
             // technikai — itt csak továbbadjuk, amiben megállapodtatok.
             $add($header, 'arfolyamBank', $invoice->exchangeBank ?? 'MNB');
             $add($header, 'arfolyam', (string) $invoice->exchangeRate);
+        }
+        if ($invoice->correctsInvoiceNumber !== null) {
+            $add($header, 'helyesbitoszamla', 'true');
+            $add($header, 'helyesbitettSzamlaszam', $invoice->correctsInvoiceNumber);
         }
 
         $seller = $doc->createElement('elado');
@@ -147,8 +175,50 @@ final class SzamlazzAgent
         return $doc->saveXML();
     }
 
+    /**
+     * A sztornókérés XML-je. A teljesítés dátumát szándékosan nem adjuk meg:
+     * azt a Számlázz.hu az eredeti számlából veszi, mi csak elronthatnánk.
+     */
+    public function buildReversalXml(string $invoiceNumber, ?string $buyerEmail = null, ?string $date = null): string
+    {
+        $doc = new \DOMDocument('1.0', 'UTF-8');
+        $doc->formatOutput = true;
+
+        $root = $doc->createElementNS(self::XMLNS_STORNO, 'xmlszamlast');
+        $root->setAttributeNS(
+            'http://www.w3.org/2001/XMLSchema-instance',
+            'xsi:schemaLocation',
+            self::XMLNS_STORNO . ' ' . self::XSD_STORNO
+        );
+        $doc->appendChild($root);
+
+        $add = static function (\DOMElement $parent, string $name, string $value) use ($doc): void {
+            $parent->appendChild($doc->createElement($name, htmlspecialchars($value, ENT_XML1)));
+        };
+
+        $settings = $doc->createElement('beallitasok');
+        $root->appendChild($settings);
+        $add($settings, 'szamlaagentkulcs', $this->agentKey);
+        $add($settings, 'eszamla', $this->eInvoice ? 'true' : 'false');
+        $add($settings, 'szamlaLetoltes', 'false');
+
+        $header = $doc->createElement('fejlec');
+        $root->appendChild($header);
+        $add($header, 'szamlaszam', $invoiceNumber);
+        $add($header, 'keltDatum', $date ?? date('Y-m-d'));
+        $add($header, 'tipus', 'SS');
+
+        if ($buyerEmail !== null) {
+            $buyer = $doc->createElement('vevo');
+            $root->appendChild($buyer);
+            $add($buyer, 'email', $buyerEmail);
+        }
+
+        return $doc->saveXML();
+    }
+
     /** @return array{0:int,1:array<string,string>} */
-    private function post(string $xml): array
+    private function post(string $field, string $xml): array
     {
         $ch = curl_init(self::ENDPOINT);
         $headers = [];
@@ -159,7 +229,7 @@ final class SzamlazzAgent
             CURLOPT_TIMEOUT => $this->timeout,
             CURLOPT_POSTFIELDS => [
                 // A mezőnév dönti el a műveletet — ezért kell fájlként küldeni.
-                'action-xmlagentxmlfile' => new \CURLStringFile(
+                $field => new \CURLStringFile(
                     $xml,
                     'szamla.xml',
                     'text/xml'
@@ -174,14 +244,13 @@ final class SzamlazzAgent
             },
         ]);
 
+        // A curl_close() PHP 8 óta nem csinál semmit (8.5-től elavult): a
+        // kezelő a függvény végén magától felszabadul.
         $body = curl_exec($ch);
         if ($body === false) {
-            $error = curl_error($ch);
-            curl_close($ch);
-            throw new AgentException("A Számlázz.hu nem elérhető: {$error}");
+            throw new AgentException('A Számlázz.hu nem elérhető: ' . curl_error($ch));
         }
         $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
 
         return [$status, $headers];
     }

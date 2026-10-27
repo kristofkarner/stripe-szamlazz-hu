@@ -1,7 +1,17 @@
 {
     "name": "kristofkarner/stripe-szamlazz-hu",
-    "description": "Magyar számla automatikus kiállítása Stripe-terhelés után — Számlázz.hu Agent API mintakód",
-    "keywords": ["stripe", "szamlazz.hu", "szamla-agent", "invoicing", "hungary", "webhook", "idempotency"],
+    "description": "Magyar számla automatikus kiállítása Stripe-terhelés után, sztornóval és helyesbítő számlával — Számlázz.hu Agent API mintakód",
+    "keywords": [
+        "stripe",
+        "szamlazz.hu",
+        "szamla-agent",
+        "invoicing",
+        "hungary",
+        "webhook",
+        "idempotency",
+        "refund",
+        "storno"
+    ],
     "type": "project",
     "license": "MIT",
     "require": {
@@ -12,6 +22,8 @@
         "stripe/stripe-php": "^13.0"
     },
     "autoload": {
-        "psr-4": { "KK\\StripeSzamlazz\\": "src/" }
+        "psr-4": {
+            "KK\\StripeSzamlazz\\": "src/"
+        }
     }
 }
