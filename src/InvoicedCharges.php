@@ -18,13 +18,23 @@ final class InvoicedCharges
     {
     }
 
+    /**
+     * Ismételten is meghívható: ha egy újrapróbálás ugyanezt a terhelést
+     * rögzítené újra, nem hibázik el rajta.
+     */
     public function record(string $chargeId, string $invoiceNumber, string $currency, int $amount): void
     {
         $stmt = $this->pdo->prepare(
             'INSERT INTO invoiced_charges (stripe_charge, invoice_number, currency, amount, refunded, updated_at)
-             VALUES (?, ?, ?, ?, 0, NOW())'
+             VALUES (?, ?, ?, ?, 0, ?)'
         );
-        $stmt->execute([$chargeId, $invoiceNumber, strtolower($currency), $amount]);
+        try {
+            $stmt->execute([$chargeId, $invoiceNumber, strtolower($currency), $amount, date('Y-m-d H:i:s')]);
+        } catch (\PDOException $e) {
+            if ($e->getCode() !== '23000') {   // 23000: már rögzítve
+                throw $e;
+            }
+        }
     }
 
     /** @return array{invoice_number: string, currency: string, amount: int, refunded: int}|null */
@@ -54,8 +64,8 @@ final class InvoicedCharges
     public function setRefunded(string $chargeId, int $refundedTotal): void
     {
         $stmt = $this->pdo->prepare(
-            'UPDATE invoiced_charges SET refunded = ?, updated_at = NOW() WHERE stripe_charge = ? AND refunded < ?'
+            'UPDATE invoiced_charges SET refunded = ?, updated_at = ? WHERE stripe_charge = ? AND refunded < ?'
         );
-        $stmt->execute([$refundedTotal, $chargeId, $refundedTotal]);
+        $stmt->execute([$refundedTotal, date('Y-m-d H:i:s'), $chargeId, $refundedTotal]);
     }
 }

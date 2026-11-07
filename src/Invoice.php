@@ -39,6 +39,9 @@ final class Invoice
         ?string $dueDate = null,
         // Helyesbítő számlánál az eredeti számla száma, amire hivatkozik.
         public readonly ?string $correctsInvoiceNumber = null,
+        // Rendelésszám: a Stripe-számla azonosítója. Ezzel kérdezhető le a
+        // számla, és a „Rendelésszám ismétlődés tiltása” ezzel véd a duplától.
+        public readonly ?string $orderNumber = null,
     ) {
         if ($items === []) {
             throw new \InvalidArgumentException('A számlán legalább egy tétel kell legyen.');

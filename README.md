@@ -21,7 +21,7 @@ meg, hogyan lesz belőle automatizmus — és hol vannak benne a csapdák.
 
 ## Amit érdemes átvenni belőle
 
-Nem a kód mennyisége a lényeg, hanem négy döntés:
+Nem a kód mennyisége a lényeg, hanem öt döntés:
 
 **1 · Az aláírás-ellenőrzés megelőz mindent, a naplózást is.**
 Ha az ellenőrzés a naplózás után futna, bárki, aki ismeri a végpont címét,
@@ -36,9 +36,29 @@ sztornózni kell. A védelem az `event_id` egyedisége az adatbázisban, és a
 **sorrend**: előbb a foglalás, utána a számla. Fordítva a két lépés közé
 beférhet egy második kérés.
 
-**3 · Hiba esetén a foglalás elengedése.**
-Ha a számlázás elszáll, a sort ki kell venni, különben a Stripe
-újraküldése sem tud próbálkozni — és a számla soha nem készül el, csendben.
+**3 · Hiba esetén: minden hibát elkapni, és tudni, mi történt a bizonylattal.**
+Ha a számlázás elszáll, a foglalást el kell engedni, különben a Stripe
+újraküldésére „már kész”-t mondanánk, és a számla csendben soha nem készülne
+el. Ehhez **minden** hibát el kell kapni, nem csak a Számlázz.hu-ét: egy
+adatbázis- vagy adathiba ugyanúgy beragasztja a foglalást.
+
+De elengedni sem szabad vakon. Ha az Agent hívása elindult, és a válasz
+elveszett (időtúllépés, sorszám nélküli válasz), lehet, hogy a számla már
+elkészült — az újraküldés ilyenkor dupla számlát csinálna. Ezért az állapotot
+is tároljuk (`claimed` → `issuing` → `done`):
+
+- ha **biztos**, hogy bizonylat nem készült (az Agentet nem hívtuk, vagy
+  kifejezett hibakóddal utasította el), a következő kézbesítés egyszerűen
+  újrakezdi;
+- ha **nem tudni**, a következő kézbesítés előbb **lekérdezi** a Számlázz.hu-ban
+  a külső azonosító (`szamlaKulsoAzon`) szerint, és csak akkor állít ki, ha
+  nincs ilyen; ha a lekérdezés sem sikerül, inkább vár;
+- ugyanazt a kérést a Számlázz.hu szabálya szerint
+  [legfeljebb ötször](https://docs.szamlazz.hu/agent/basics/error-handling)
+  szabad elküldeni: utána a rendszer felad, és riaszt, mert ember kell.
+
+Minden hiba riasztással jár (`webhook.php`: alapból `error_log`, élesben
+e-mail vagy üzenet), mert az elmaradt számlának látszania kell.
 
 **4 · A visszatérítés nem vonja vissza a számlát.**
 A Stripe-ban a visszatérítés egy gomb; a kiállított magyar számlához nem
@@ -56,6 +76,21 @@ tároljuk, mennyit kezeltünk már le, és csak a különbséget számlázzuk. A
 a visszatérítési esemény **nem tudja a magyar számla számát**. Ezt a számla
 kiállításakor kell eltenni (`invoiced_charges`), különben nem lehet megmondani,
 mit kell sztornózni.
+
+**5 · Rendelésszám, és a „Rendelésszám ismétlődés tiltása”.**
+A minta minden számlára rendelésszámot (`rendelesSzam`) ír: a Stripe-számla
+azonosítóját. Ha a Számlázz.hu fiókban bekapcsolod a **Beállítások →
+Fiókbeállítások → Számlázási beállítások → „Rendelésszám ismétlődés tiltása”**
+kapcsolót, ugyanarra a Stripe-számlára második magyar számla nem készülhet: ha
+egy elveszett válasz után ugyanaz a kérés újra megy, az Agent a korábbi számlát
+adja vissza, eltérő adatnál pedig 71-es vagy 152-es hibát ad („Már létező
+rendelésszám”). A minta ezt nem hibának veszi, hanem lekérdezi a meglévő
+számla sorszámát. Ez egy második védvonal a saját foglalás mögött, és akkor is
+véd, ha két különböző esemény (vagy egy másik bővítmény) ugyanarra a fizetésre
+számlázna. **A sztornó és a helyesbítő számla mentes a tiltás alól** — ott a
+saját foglalás, a halmozott visszatérítési összeg és a külső azonosító szerinti
+lekérdezés véd a duplától.
+[Forrás](https://docs.szamlazz.hu/agent/generating_invoice/settings_and_rules/order-number)
 
 Ehhez jön négy apróság, ami élesben derül ki:
 
@@ -95,7 +130,9 @@ a `webhook.php` eleje megmondja, hol kell igazítani.
 Hálózat nélkül is kipróbálható:
 
 ```bash
-php test.php     # számítások, pénznem, visszatérítési döntés, a három XML-fajta
+php test.php     # számítások, pénznem, visszatérítés, az XML-ek, és a webhook
+                 # hibakezelése: elveszett válasz, adatbázis-hiba, 71/152,
+                 # párhuzamos kézbesítés, 5-ös korlát — SQLite, hálózat nélkül
 ```
 
 ## Amit ez a minta NEM tartalmaz

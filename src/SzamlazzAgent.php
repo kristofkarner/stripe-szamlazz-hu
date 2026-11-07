@@ -16,13 +16,21 @@ namespace KK\StripeSzamlazz;
  * (URL-kódolva), szlahu_szamlaszam (URL-kódolva). A hibát tehát akkor is
  * látni kell, ha a HTTP-státusz 200.
  */
-final class SzamlazzAgent
+final class SzamlazzAgent implements InvoiceAgent
 {
     private const ENDPOINT = 'https://www.szamlazz.hu/szamla/';
     private const XMLNS = 'http://www.szamlazz.hu/xmlszamla';
     private const XSD = 'http://www.szamlazz.hu/szamla/docs/xsds/agent/xmlszamla.xsd';
     private const XMLNS_STORNO = 'http://www.szamlazz.hu/xmlszamlast';
     private const XSD_STORNO = 'https://www.szamlazz.hu/szamla/docs/xsds/agentst/xmlszamlast.xsd';
+    private const XMLNS_QUERY = 'http://www.szamlazz.hu/xmlszamlaxml';
+    private const XSD_QUERY = 'https://www.szamlazz.hu/szamla/docs/xsds/agentxml/xmlszamlaxml.xsd';
+
+    /** „Már létező rendelésszám” — a 152-es a számot is megnevezi. */
+    private const DUPLICATE_ORDER_NUMBER = [71, 152];
+
+    /** Lekérdezésnél: nincs ilyen számlaszám, rendelésszám vagy külső azonosító. */
+    private const NOT_FOUND = 7;
 
     public function __construct(
         private readonly string $agentKey,
@@ -44,14 +52,27 @@ final class SzamlazzAgent
     }
 
     /**
+     * Megkeresi a már kiállított bizonylatot. Akkor kell, ha egy kérés
+     * kimenetele ismeretlen (időtúllépés, sorszám nélküli válasz): újraküldés
+     * ELŐTT ezzel derül ki, hogy elkészült-e, különben dupla számla lehet.
+     *
+     * Forrás: https://docs.szamlazz.hu/agent/querying_xml/request
+     */
+    public function find(?string $externalId = null, ?string $orderNumber = null): ?string
+    {
+        [$status, $headers, $body] = $this->post('action-szamla_agent_xml', $this->buildQueryXml($externalId, $orderNumber));
+        return self::invoiceNumberFromQuery($status, $headers, $body);
+    }
+
+    /**
      * Egy kiállított számla sztornózása — teljes visszatérítésnél.
      *
      * @return string a sztornó számla sorszáma
      * @throws AgentException ha az Agent hibát jelez
      */
-    public function reverse(string $invoiceNumber, ?string $buyerEmail = null): string
+    public function reverse(string $invoiceNumber, ?string $buyerEmail = null, ?string $externalId = null): string
     {
-        [$status, $headers] = $this->post('action-szamla_agent_st', $this->buildReversalXml($invoiceNumber, $buyerEmail));
+        [$status, $headers] = $this->post('action-szamla_agent_st', $this->buildReversalXml($invoiceNumber, $buyerEmail, null, $externalId));
         return self::invoiceNumberFrom($status, $headers);
     }
 
@@ -66,9 +87,15 @@ final class SzamlazzAgent
         $errorCode = $headers['szlahu_error_code'] ?? null;
         if ($errorCode !== null && $errorCode !== '') {
             $message = urldecode($headers['szlahu_error'] ?? 'ismeretlen hiba');
+            $code = (int) $errorCode;
             throw new AgentException(
                 sprintf('Számla Agent hiba (%s): %s', $errorCode, $message),
-                (int) $errorCode
+                $code,
+                // A „már létező rendelésszám” nem hiba, hanem azt jelenti,
+                // hogy egy korábbi kérés elkészítette a számlát.
+                in_array($code, self::DUPLICATE_ORDER_NUMBER, true)
+                    ? AgentException::DUPLICATE
+                    : AgentException::REJECTED
             );
         }
 
@@ -77,7 +104,9 @@ final class SzamlazzAgent
             throw new AgentException(
                 "A válasz nem tartalmaz számlaszámot (HTTP {$status}). "
                 . 'Ilyenkor NEM biztos, hogy a számla nem készült el — '
-                . 'ellenőrizd a Számlázz.hu felületén, mielőtt újraküldenéd.'
+                . 'újraküldés előtt le kell kérdezni (find()).',
+                0,
+                AgentException::UNKNOWN
             );
         }
 
@@ -127,6 +156,12 @@ final class SzamlazzAgent
             // technikai — itt csak továbbadjuk, amiben megállapodtatok.
             $add($header, 'arfolyamBank', $invoice->exchangeBank ?? 'MNB');
             $add($header, 'arfolyam', (string) $invoice->exchangeRate);
+        }
+        if ($invoice->orderNumber !== null) {
+            // A kötött sorrendben az árfolyam után, a helyesbítés előtt.
+            // Ha a fiókban be van kapcsolva a „Rendelésszám ismétlődés
+            // tiltása”, ugyanerre a számra második számla nem készül.
+            $add($header, 'rendelesSzam', $invoice->orderNumber);
         }
         if ($invoice->correctsInvoiceNumber !== null) {
             $add($header, 'helyesbitoszamla', 'true');
@@ -179,7 +214,7 @@ final class SzamlazzAgent
      * A sztornókérés XML-je. A teljesítés dátumát szándékosan nem adjuk meg:
      * azt a Számlázz.hu az eredeti számlából veszi, mi csak elronthatnánk.
      */
-    public function buildReversalXml(string $invoiceNumber, ?string $buyerEmail = null, ?string $date = null): string
+    public function buildReversalXml(string $invoiceNumber, ?string $buyerEmail = null, ?string $date = null, ?string $externalId = null): string
     {
         $doc = new \DOMDocument('1.0', 'UTF-8');
         $doc->formatOutput = true;
@@ -201,6 +236,11 @@ final class SzamlazzAgent
         $add($settings, 'szamlaagentkulcs', $this->agentKey);
         $add($settings, 'eszamla', $this->eInvoice ? 'true' : 'false');
         $add($settings, 'szamlaLetoltes', 'false');
+        if ($externalId !== null) {
+            // A sztornó is visszakereshető legyen, ha a válasz elveszik:
+            // a sztornó mentes a rendelésszám-tiltás alól, itt ez véd.
+            $add($settings, 'szamlaKulsoAzon', $externalId);
+        }
 
         $header = $doc->createElement('fejlec');
         $root->appendChild($header);
@@ -217,7 +257,94 @@ final class SzamlazzAgent
         return $doc->saveXML();
     }
 
-    /** @return array{0:int,1:array<string,string>} */
+    /** A lekérdezés XML-je: külső azonosító vagy rendelésszám szerint. */
+    public function buildQueryXml(?string $externalId, ?string $orderNumber): string
+    {
+        if ($externalId === null && $orderNumber === null) {
+            throw new \InvalidArgumentException('A lekérdezéshez külső azonosító vagy rendelésszám kell.');
+        }
+        $doc = new \DOMDocument('1.0', 'UTF-8');
+        $doc->formatOutput = true;
+        $root = $doc->createElementNS(self::XMLNS_QUERY, 'xmlszamlaxml');
+        $root->setAttributeNS(
+            'http://www.w3.org/2001/XMLSchema-instance',
+            'xsi:schemaLocation',
+            self::XMLNS_QUERY . ' ' . self::XSD_QUERY
+        );
+        $doc->appendChild($root);
+        $add = static function (string $name, string $value) use ($doc, $root): void {
+            $root->appendChild($doc->createElement($name, htmlspecialchars($value, ENT_XML1)));
+        };
+        // Kötött sorrend: kulcs, (számlaszám), rendelésszám, (pdf), külső azonosító.
+        $add('szamlaagentkulcs', $this->agentKey);
+        if ($orderNumber !== null) {
+            $add('rendelesSzam', $orderNumber);
+        }
+        if ($externalId !== null) {
+            $add('szamlaKulsoAzon', $externalId);
+        }
+        return $doc->saveXML();
+    }
+
+    /**
+     * A lekérdezés válaszából a sorszám. Siker: a teljes `szamla` XML. Hiba:
+     * `xmlszamlavalasz` a hibakóddal; a 7-es azt jelenti, hogy nincs ilyen
+     * bizonylat. Minden más hibánál NEM tudjuk a választ, ezért kivétel.
+     *
+     * @param array<string,string> $headers kisbetűs fejlécnevekkel
+     */
+    public static function invoiceNumberFromQuery(int $status, array $headers, string $body): ?string
+    {
+        $headerCode = $headers['szlahu_error_code'] ?? '';
+        if ($headerCode !== '') {
+            if ((int) $headerCode === self::NOT_FOUND) {
+                return null;
+            }
+            throw new AgentException(
+                'Lekérdezési hiba (' . $headerCode . '): ' . urldecode($headers['szlahu_error'] ?? ''),
+                (int) $headerCode,
+                AgentException::UNKNOWN
+            );
+        }
+
+        $doc = new \DOMDocument();
+        if ($body === '' || !@$doc->loadXML($body)) {
+            throw new AgentException("Olvashatatlan lekérdezési válasz (HTTP {$status}).", 0, AgentException::UNKNOWN);
+        }
+        $root = $doc->documentElement;
+        $text = static function (string $name) use ($doc): string {
+            $nodes = $doc->getElementsByTagNameNS('*', $name);
+            return $nodes->length > 0 ? trim($nodes->item(0)->textContent) : '';
+        };
+
+        if ($root->localName === 'xmlszamlavalasz') {
+            $code = (int) $text('hibakod');
+            if ($code === self::NOT_FOUND) {
+                return null;
+            }
+            throw new AgentException(
+                'Lekérdezési hiba (' . $code . '): ' . $text('hibauzenet'),
+                $code,
+                AgentException::UNKNOWN
+            );
+        }
+
+        $alap = $doc->getElementsByTagNameNS('*', 'alap');
+        $number = '';
+        if ($alap->length > 0) {
+            foreach ($alap->item(0)->childNodes as $child) {
+                if ($child instanceof \DOMElement && $child->localName === 'szamlaszam') {
+                    $number = trim($child->textContent);
+                }
+            }
+        }
+        if ($number === '') {
+            throw new AgentException("A lekérdezés válaszában nincs számlaszám (HTTP {$status}).", 0, AgentException::UNKNOWN);
+        }
+        return $number;
+    }
+
+    /** @return array{0:int,1:array<string,string>,2:string} */
     private function post(string $field, string $xml): array
     {
         $ch = curl_init(self::ENDPOINT);
@@ -248,11 +375,12 @@ final class SzamlazzAgent
         // kezelő a függvény végén magától felszabadul.
         $body = curl_exec($ch);
         if ($body === false) {
-            throw new AgentException('A Számlázz.hu nem elérhető: ' . curl_error($ch));
+            // Időtúllépésnél a kérés már célba érhetett: a kimenetel ismeretlen.
+            throw new AgentException('A Számlázz.hu nem válaszolt: ' . curl_error($ch), 0, AgentException::UNKNOWN);
         }
         $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
-        return [$status, $headers];
+        return [$status, $headers, (string) $body];
     }
 
     private static function num(float $value): string
