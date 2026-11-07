@@ -130,6 +130,9 @@ final class WebhookHandler
             $stripeInvoice = $event->data->object;
             $customer = $stripeInvoice->customer_address ?? null;
 
+            if (!isset($stripeInvoice->lines->data)) {
+                throw new \UnexpectedValueException("A Stripe-számlán nincsenek tételek: {$stripeInvoice->id}");
+            }
             $items = [];
             foreach ($stripeInvoice->lines->data as $line) {
                 $quantity = max(1, (int) ($line->quantity ?? 1));
